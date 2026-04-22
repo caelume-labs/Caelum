@@ -10,7 +10,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Env, Symbol,
+    contract, contractclient, contractimpl, contracttype, Address, Bytes, Env, Symbol,
 };
 // Standard SEP-41 interface for pool tokens (token_a, token_b)
 use soroban_sdk::token::Client as SepTokenClient;
@@ -29,6 +29,7 @@ pub enum DataKey {
     TotalShares,
     Shares(Address),
     FeeBps, // fee in basis points, e.g. 30 = 0.30 %
+    FlashLoanFeeBps,
 }
 
 // ── Pool info returned by `get_info` ─────────────────────────────────────────
@@ -41,6 +42,12 @@ pub struct PoolInfo {
     pub reserve_b: i128,
     pub total_shares: i128,
     pub fee_bps: i128,
+    pub flash_loan_fee_bps: i128,
+}
+
+#[contractclient(name = "FlashLoanReceiverClient")]
+pub trait FlashLoanReceiver {
+    fn on_flash_loan(env: Env, token: Address, amount: i128, fee: i128, data: Bytes) -> bool;
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -62,16 +69,35 @@ impl AmmPool {
         lp_token: Address,
         fee_bps: i128, // recommended: 30 (0.30 %)
     ) {
+        Self::initialize_with_flash_loan_fee(env, token_a, token_b, lp_token, fee_bps, fee_bps);
+    }
+
+    /// Initialize the pool with a distinct flash-loan fee.
+    pub fn initialize_with_flash_loan_fee(
+        env: Env,
+        token_a: Address,
+        token_b: Address,
+        lp_token: Address,
+        fee_bps: i128,
+        flash_loan_fee_bps: i128,
+    ) {
         if env.storage().instance().has(&DataKey::TokenA) {
             panic!("already initialized");
         }
         assert!(token_a != token_b, "tokens must differ");
         assert!(fee_bps >= 0 && fee_bps <= 10_000, "invalid fee");
+        assert!(
+            flash_loan_fee_bps >= 0 && flash_loan_fee_bps <= 10_000,
+            "invalid flash loan fee"
+        );
 
         env.storage().instance().set(&DataKey::TokenA, &token_a);
         env.storage().instance().set(&DataKey::TokenB, &token_b);
         env.storage().instance().set(&DataKey::LpToken, &lp_token);
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::FlashLoanFeeBps, &flash_loan_fee_bps);
         env.storage().instance().set(&DataKey::ReserveA, &0_i128);
         env.storage().instance().set(&DataKey::ReserveB, &0_i128);
         env.storage().instance().set(&DataKey::TotalShares, &0_i128);
@@ -282,6 +308,64 @@ impl AmmPool {
         amount_out
     }
 
+    /// Borrow pool liquidity and repay it plus a fee during the receiver callback.
+    pub fn flash_loan(
+        env: Env,
+        receiver: Address,
+        token: Address,
+        amount: i128,
+        data: Bytes,
+    ) -> i128 {
+        assert!(amount > 0, "amount must be positive");
+
+        let token_a: Address = env.storage().instance().get(&DataKey::TokenA).unwrap();
+        let token_b: Address = env.storage().instance().get(&DataKey::TokenB).unwrap();
+        let reserve = if token == token_a {
+            Self::get_reserve_a(env.clone())
+        } else if token == token_b {
+            Self::get_reserve_b(env.clone())
+        } else {
+            panic!("token is not part of this pool");
+        };
+        assert!(reserve >= amount, "insufficient liquidity");
+
+        let fee_bps = Self::get_flash_loan_fee_bps(env.clone());
+        let fee = amount * fee_bps / 10_000;
+        let pool = env.current_contract_address();
+        let token_client = SepTokenClient::new(&env, &token);
+        let balance_before = token_client.balance(&pool);
+
+        token_client.transfer(&pool, &receiver, &amount);
+
+        let accepted = FlashLoanReceiverClient::new(&env, &receiver)
+            .on_flash_loan(&token, &amount, &fee, &data);
+        assert!(accepted, "flash loan callback rejected");
+
+        let balance_after = token_client.balance(&pool);
+        assert!(
+            balance_after >= balance_before + fee,
+            "flash loan was not repaid"
+        );
+
+        let reserve_after = reserve + (balance_after - balance_before);
+        if token == token_a {
+            env.storage()
+                .instance()
+                .set(&DataKey::ReserveA, &reserve_after);
+        } else {
+            env.storage()
+                .instance()
+                .set(&DataKey::ReserveB, &reserve_after);
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "flash_loan"), receiver),
+            (token, amount, fee),
+        );
+
+        fee
+    }
+
     // ── Quotes (read-only) ────────────────────────────────────────────────────
 
     /// Quote how much `token_out` you receive for `amount_in` of `token_in`.
@@ -311,6 +395,7 @@ impl AmmPool {
             reserve_b: Self::get_reserve_b(env.clone()),
             total_shares: Self::get_total_shares(env.clone()),
             fee_bps: env.storage().instance().get(&DataKey::FeeBps).unwrap(),
+            flash_loan_fee_bps: Self::get_flash_loan_fee_bps(env.clone()),
         }
     }
 
@@ -333,6 +418,13 @@ impl AmmPool {
 
     fn get_total_shares(env: Env) -> i128 {
         env.storage().instance().get(&DataKey::TotalShares).unwrap_or(0)
+    }
+
+    fn get_flash_loan_fee_bps(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::FlashLoanFeeBps)
+            .unwrap_or_else(|| env.storage().instance().get(&DataKey::FeeBps).unwrap_or(0))
     }
 
     /// Integer square root via Newton's method.
@@ -364,6 +456,47 @@ mod tests {
         Env,
     };
     use token::LpToken;
+
+    #[contracttype]
+    enum ReceiverDataKey {
+        Amm,
+        ShouldRepay,
+    }
+
+    #[contract]
+    pub struct MockFlashLoanReceiver;
+
+    #[contractimpl]
+    impl MockFlashLoanReceiver {
+        pub fn initialize(env: Env, amm: Address, should_repay: bool) {
+            env.storage().instance().set(&ReceiverDataKey::Amm, &amm);
+            env.storage()
+                .instance()
+                .set(&ReceiverDataKey::ShouldRepay, &should_repay);
+        }
+
+        pub fn on_flash_loan(
+            env: Env,
+            token: Address,
+            amount: i128,
+            fee: i128,
+            _data: Bytes,
+        ) -> bool {
+            let should_repay = env
+                .storage()
+                .instance()
+                .get(&ReceiverDataKey::ShouldRepay)
+                .unwrap_or(false);
+
+            if should_repay {
+                let amm: Address = env.storage().instance().get(&ReceiverDataKey::Amm).unwrap();
+                let token_client = SepTokenClient::new(&env, &token);
+                token_client.transfer(&env.current_contract_address(), &amm, &(amount + fee));
+            }
+
+            true
+        }
+    }
 
     /// Register a Stellar Asset Contract and return (TokenClient, StellarAssetClient).
     fn create_sac<'a>(
@@ -420,6 +553,7 @@ mod tests {
         let info = amm.get_info();
         assert_eq!(info.reserve_a, 1_000_000);
         assert_eq!(info.reserve_b, 2_000_000);
+        assert_eq!(info.flash_loan_fee_bps, 30);
 
         // Swap 100_000 A → B
         let trader = Address::generate(&env);
@@ -451,5 +585,74 @@ mod tests {
 
         let info = amm.get_info();
         assert_eq!(info.total_shares, 0);
+    }
+
+    #[test]
+    fn test_flash_loan_success_with_repayment() {
+        let (env, admin, amm_addr, lp_addr, _) = setup();
+
+        let (ta_client, ta_sac) = create_sac(&env, &admin);
+        let (tb_client, tb_sac) = create_sac(&env, &admin);
+
+        let amm = AmmPoolClient::new(&env, &amm_addr);
+        amm.initialize_with_flash_loan_fee(
+            &ta_client.address,
+            &tb_client.address,
+            &lp_addr,
+            &30_i128,
+            &50_i128,
+        );
+
+        let provider = Address::generate(&env);
+        ta_sac.mint(&provider, &1_000_000_i128);
+        tb_sac.mint(&provider, &1_000_000_i128);
+        amm.add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &0_i128);
+
+        let receiver_addr = env.register_contract(None, MockFlashLoanReceiver);
+        let receiver = MockFlashLoanReceiverClient::new(&env, &receiver_addr);
+        receiver.initialize(&amm_addr, &true);
+
+        ta_sac.mint(&receiver_addr, &1_000_i128);
+
+        let fee = amm.flash_loan(
+            &receiver_addr,
+            &ta_client.address,
+            &100_000_i128,
+            &Bytes::new(&env),
+        );
+        assert_eq!(fee, 500);
+
+        let info = amm.get_info();
+        assert_eq!(info.reserve_a, 1_000_500);
+        assert_eq!(info.reserve_b, 1_000_000);
+        assert_eq!(info.flash_loan_fee_bps, 50);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_flash_loan_failed_repayment_panics() {
+        let (env, admin, amm_addr, lp_addr, _) = setup();
+
+        let (ta_client, ta_sac) = create_sac(&env, &admin);
+        let (tb_client, tb_sac) = create_sac(&env, &admin);
+
+        let amm = AmmPoolClient::new(&env, &amm_addr);
+        amm.initialize(&ta_client.address, &tb_client.address, &lp_addr, &30_i128);
+
+        let provider = Address::generate(&env);
+        ta_sac.mint(&provider, &1_000_000_i128);
+        tb_sac.mint(&provider, &1_000_000_i128);
+        amm.add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &0_i128);
+
+        let receiver_addr = env.register_contract(None, MockFlashLoanReceiver);
+        let receiver = MockFlashLoanReceiverClient::new(&env, &receiver_addr);
+        receiver.initialize(&amm_addr, &false);
+
+        amm.flash_loan(
+            &receiver_addr,
+            &ta_client.address,
+            &100_000_i128,
+            &Bytes::new(&env),
+        );
     }
 }
