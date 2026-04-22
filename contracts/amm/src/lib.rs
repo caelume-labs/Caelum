@@ -29,6 +29,7 @@ pub enum DataKey {
     TotalShares,
     Shares(Address),
     FeeBps,          // swap fee in basis points, e.g. 30 = 0.30 %
+    Admin,           // Address — contract administrator; authorises set_protocol_fee
     FeeRecipient,    // Address — receives accrued protocol fees
     ProtocolFeeBps,  // i128 — protocol fee bps (subset of FeeBps going to protocol)
     AccruedFeeA,     // i128 — protocol fees accrued in TokenA
@@ -59,10 +60,13 @@ impl AmmPool {
     /// Initialize the pool.
     ///
     /// `lp_token` must already be deployed and its admin set to this contract.
+    /// `admin` is stored as the contract administrator and is the only address
+    /// permitted to call `set_protocol_fee` after deployment.
     /// `fee_recipient` receives accrued protocol fees via `withdraw_protocol_fees`.
     /// `protocol_fee_bps` must be ≤ `fee_bps`; set to 0 to disable protocol fees.
     pub fn initialize(
         env: Env,
+        admin: Address,
         token_a: Address,
         token_b: Address,
         lp_token: Address,
@@ -80,6 +84,7 @@ impl AmmPool {
             "invalid protocol fee"
         );
 
+        env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::TokenA, &token_a);
         env.storage().instance().set(&DataKey::TokenB, &token_b);
         env.storage().instance().set(&DataKey::LpToken, &lp_token);
@@ -91,6 +96,39 @@ impl AmmPool {
         env.storage().instance().set(&DataKey::TotalShares, &0_i128);
         env.storage().instance().set(&DataKey::AccruedFeeA, &0_i128);
         env.storage().instance().set(&DataKey::AccruedFeeB, &0_i128);
+    }
+
+    /// Update the protocol fee configuration. Admin-only.
+    ///
+    /// Set `protocol_fee_bps` to 0 to disable protocol fee collection.
+    /// `protocol_fee_bps` must be ≤ the pool's `fee_bps`.
+    pub fn set_protocol_fee(
+        env: Env,
+        admin: Address,
+        recipient: Address,
+        protocol_fee_bps: i128,
+    ) {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        assert!(admin == stored_admin, "not admin");
+        admin.require_auth();
+
+        let fee_bps: i128 = env.storage().instance().get(&DataKey::FeeBps).unwrap();
+        assert!(
+            protocol_fee_bps >= 0 && protocol_fee_bps <= fee_bps,
+            "invalid protocol fee"
+        );
+
+        env.storage().instance().set(&DataKey::FeeRecipient, &recipient);
+        env.storage().instance().set(&DataKey::ProtocolFeeBps, &protocol_fee_bps);
+    }
+
+    /// Return the current protocol fee recipient and rate.
+    ///
+    /// Returns `(None, 0)` when protocol fees are disabled.
+    pub fn get_protocol_fee(env: Env) -> (Option<Address>, i128) {
+        let recipient: Option<Address> = env.storage().instance().get(&DataKey::FeeRecipient);
+        let bps: i128 = env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
+        (recipient, bps)
     }
 
     // ── Liquidity ─────────────────────────────────────────────────────────────
@@ -485,6 +523,7 @@ mod tests {
 
         let amm = AmmPoolClient::new(&env, &amm_addr);
         amm.initialize(
+            &admin,
             &ta_client.address,
             &tb_client.address,
             &lp_addr,
@@ -524,6 +563,7 @@ mod tests {
 
         let amm = AmmPoolClient::new(&env, &amm_addr);
         amm.initialize(
+            &admin,
             &ta_client.address,
             &tb_client.address,
             &lp_addr,
@@ -555,6 +595,7 @@ mod tests {
         let amm = AmmPoolClient::new(&env, &amm_addr);
         // fee_bps=30, protocol_fee_bps=5
         amm.initialize(
+            &admin,
             &ta_client.address,
             &tb_client.address,
             &lp_addr,
