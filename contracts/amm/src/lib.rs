@@ -28,7 +28,11 @@ pub enum DataKey {
     ReserveB,
     TotalShares,
     Shares(Address),
-    FeeBps, // fee in basis points, e.g. 30 = 0.30 %
+    FeeBps,          // swap fee in basis points, e.g. 30 = 0.30 %
+    FeeRecipient,    // Address — receives accrued protocol fees
+    ProtocolFeeBps,  // i128 — protocol fee bps (subset of FeeBps going to protocol)
+    AccruedFeeA,     // i128 — protocol fees accrued in TokenA
+    AccruedFeeB,     // i128 — protocol fees accrued in TokenB
 }
 
 // ── Pool info returned by `get_info` ─────────────────────────────────────────
@@ -55,26 +59,38 @@ impl AmmPool {
     /// Initialize the pool.
     ///
     /// `lp_token` must already be deployed and its admin set to this contract.
+    /// `fee_recipient` receives accrued protocol fees via `withdraw_protocol_fees`.
+    /// `protocol_fee_bps` must be ≤ `fee_bps`; set to 0 to disable protocol fees.
     pub fn initialize(
         env: Env,
         token_a: Address,
         token_b: Address,
         lp_token: Address,
         fee_bps: i128, // recommended: 30 (0.30 %)
+        fee_recipient: Address,
+        protocol_fee_bps: i128,
     ) {
         if env.storage().instance().has(&DataKey::TokenA) {
             panic!("already initialized");
         }
         assert!(token_a != token_b, "tokens must differ");
         assert!(fee_bps >= 0 && fee_bps <= 10_000, "invalid fee");
+        assert!(
+            protocol_fee_bps >= 0 && protocol_fee_bps <= fee_bps,
+            "invalid protocol fee"
+        );
 
         env.storage().instance().set(&DataKey::TokenA, &token_a);
         env.storage().instance().set(&DataKey::TokenB, &token_b);
         env.storage().instance().set(&DataKey::LpToken, &lp_token);
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
+        env.storage().instance().set(&DataKey::FeeRecipient, &fee_recipient);
+        env.storage().instance().set(&DataKey::ProtocolFeeBps, &protocol_fee_bps);
         env.storage().instance().set(&DataKey::ReserveA, &0_i128);
         env.storage().instance().set(&DataKey::ReserveB, &0_i128);
         env.storage().instance().set(&DataKey::TotalShares, &0_i128);
+        env.storage().instance().set(&DataKey::AccruedFeeA, &0_i128);
+        env.storage().instance().set(&DataKey::AccruedFeeB, &0_i128);
     }
 
     // ── Liquidity ─────────────────────────────────────────────────────────────
@@ -215,6 +231,7 @@ impl AmmPool {
     /// Swap an exact `amount_in` of `token_in` for at least `min_out` of the other token.
     ///
     /// Uses the constant-product formula with fee deducted from `amount_in`.
+    /// The `protocol_fee_bps` portion of `amount_in` is held for `withdraw_protocol_fees`.
     pub fn swap(
         env: Env,
         trader: Address,
@@ -257,21 +274,44 @@ impl AmmPool {
         let client_out = SepTokenClient::new(&env, &token_out);
         client_out.transfer(&env.current_contract_address(), &trader, &amount_out);
 
-        // Update reserves.
+        // Separate protocol fee from LP reserves.
+        let protocol_fee_bps: i128 =
+            env.storage().instance().get(&DataKey::ProtocolFeeBps).unwrap_or(0);
+        let protocol_fee = if protocol_fee_bps > 0 {
+            amount_in * protocol_fee_bps / 10_000
+        } else {
+            0
+        };
+
+        // Update reserves (protocol fee held outside LP reserves).
         if token_in == token_a {
             env.storage()
                 .instance()
-                .set(&DataKey::ReserveA, &(reserve_in + amount_in));
+                .set(&DataKey::ReserveA, &(reserve_in + amount_in - protocol_fee));
             env.storage()
                 .instance()
                 .set(&DataKey::ReserveB, &(reserve_out - amount_out));
+            if protocol_fee > 0 {
+                let accrued: i128 =
+                    env.storage().instance().get(&DataKey::AccruedFeeA).unwrap_or(0);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::AccruedFeeA, &(accrued + protocol_fee));
+            }
         } else {
             env.storage()
                 .instance()
-                .set(&DataKey::ReserveB, &(reserve_in + amount_in));
+                .set(&DataKey::ReserveB, &(reserve_in + amount_in - protocol_fee));
             env.storage()
                 .instance()
                 .set(&DataKey::ReserveA, &(reserve_out - amount_out));
+            if protocol_fee > 0 {
+                let accrued: i128 =
+                    env.storage().instance().get(&DataKey::AccruedFeeB).unwrap_or(0);
+                env.storage()
+                    .instance()
+                    .set(&DataKey::AccruedFeeB, &(accrued + protocol_fee));
+            }
         }
 
         env.events().publish(
@@ -280,6 +320,44 @@ impl AmmPool {
         );
 
         amount_out
+    }
+
+    // ── Protocol Fees ─────────────────────────────────────────────────────────
+
+    /// Withdraw all accrued protocol fees to the configured fee recipient.
+    ///
+    /// Only callable by the fee recipient. Resets accrued balances to zero.
+    /// Returns `(fee_a_withdrawn, fee_b_withdrawn)`.
+    pub fn withdraw_protocol_fees(env: Env) -> (i128, i128) {
+        let fee_recipient: Address =
+            env.storage().instance().get(&DataKey::FeeRecipient).unwrap();
+        fee_recipient.require_auth();
+
+        let token_a: Address = env.storage().instance().get(&DataKey::TokenA).unwrap();
+        let token_b: Address = env.storage().instance().get(&DataKey::TokenB).unwrap();
+
+        let fee_a: i128 = env.storage().instance().get(&DataKey::AccruedFeeA).unwrap_or(0);
+        let fee_b: i128 = env.storage().instance().get(&DataKey::AccruedFeeB).unwrap_or(0);
+
+        if fee_a > 0 {
+            SepTokenClient::new(&env, &token_a).transfer(
+                &env.current_contract_address(),
+                &fee_recipient,
+                &fee_a,
+            );
+            env.storage().instance().set(&DataKey::AccruedFeeA, &0_i128);
+        }
+
+        if fee_b > 0 {
+            SepTokenClient::new(&env, &token_b).transfer(
+                &env.current_contract_address(),
+                &fee_recipient,
+                &fee_b,
+            );
+            env.storage().instance().set(&DataKey::AccruedFeeB, &0_i128);
+        }
+
+        (fee_a, fee_b)
     }
 
     // ── Quotes (read-only) ────────────────────────────────────────────────────
@@ -394,7 +472,7 @@ mod tests {
             &7u32,
         );
 
-        (env, admin, amm_addr, lp_addr, admin)
+        (env, admin.clone(), amm_addr, lp_addr, admin)
     }
 
     #[test]
@@ -406,7 +484,14 @@ mod tests {
         let (tb_client, tb_sac) = create_sac(&env, &admin);
 
         let amm = AmmPoolClient::new(&env, &amm_addr);
-        amm.initialize(&ta_client.address, &tb_client.address, &lp_addr, &30_i128);
+        amm.initialize(
+            &ta_client.address,
+            &tb_client.address,
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &0_i128,
+        );
 
         // Mint tokens to provider
         let provider = Address::generate(&env);
@@ -438,7 +523,14 @@ mod tests {
         let (tb_client, tb_sac) = create_sac(&env, &admin);
 
         let amm = AmmPoolClient::new(&env, &amm_addr);
-        amm.initialize(&ta_client.address, &tb_client.address, &lp_addr, &30_i128);
+        amm.initialize(
+            &ta_client.address,
+            &tb_client.address,
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &0_i128,
+        );
 
         let provider = Address::generate(&env);
         ta_sac.mint(&provider, &1_000_000_i128);
@@ -451,5 +543,115 @@ mod tests {
 
         let info = amm.get_info();
         assert_eq!(info.total_shares, 0);
+    }
+
+    #[test]
+    fn test_protocol_fee_accrual() {
+        let (env, admin, amm_addr, lp_addr, _) = setup();
+
+        let (ta_client, ta_sac) = create_sac(&env, &admin);
+        let (tb_client, tb_sac) = create_sac(&env, &admin);
+
+        let amm = AmmPoolClient::new(&env, &amm_addr);
+        // fee_bps=30, protocol_fee_bps=5
+        amm.initialize(
+            &ta_client.address,
+            &tb_client.address,
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &5_i128,
+        );
+
+        let provider = Address::generate(&env);
+        ta_sac.mint(&provider, &1_000_000_i128);
+        tb_sac.mint(&provider, &1_000_000_i128);
+        amm.add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &0_i128);
+
+        let trader = Address::generate(&env);
+        ta_sac.mint(&trader, &200_000_i128);
+
+        // Two swaps of 100_000 A each — protocol fee per swap = 100_000 * 5 / 10_000 = 50
+        amm.swap(&trader, &ta_client.address, &100_000_i128, &0_i128);
+        amm.swap(&trader, &ta_client.address, &100_000_i128, &0_i128);
+
+        let admin_bal_before = ta_client.balance(&admin);
+        let (withdrawn_a, withdrawn_b) = amm.withdraw_protocol_fees();
+        let admin_bal_after = ta_client.balance(&admin);
+
+        assert_eq!(withdrawn_a, 100_i128); // 50 + 50
+        assert_eq!(withdrawn_b, 0_i128);
+        assert_eq!(admin_bal_after - admin_bal_before, 100_i128);
+    }
+
+    #[test]
+    fn test_withdraw_resets_accrued() {
+        let (env, admin, amm_addr, lp_addr, _) = setup();
+
+        let (ta_client, ta_sac) = create_sac(&env, &admin);
+        let (tb_client, tb_sac) = create_sac(&env, &admin);
+
+        let amm = AmmPoolClient::new(&env, &amm_addr);
+        amm.initialize(
+            &ta_client.address,
+            &tb_client.address,
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &5_i128,
+        );
+
+        let provider = Address::generate(&env);
+        ta_sac.mint(&provider, &1_000_000_i128);
+        tb_sac.mint(&provider, &1_000_000_i128);
+        amm.add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &0_i128);
+
+        let trader = Address::generate(&env);
+        ta_sac.mint(&trader, &100_000_i128);
+        amm.swap(&trader, &ta_client.address, &100_000_i128, &0_i128);
+
+        // First withdrawal collects accrued fees.
+        let (w1_a, _) = amm.withdraw_protocol_fees();
+        assert!(w1_a > 0);
+
+        // Second withdrawal: accrued balances were reset to zero.
+        let (w2_a, w2_b) = amm.withdraw_protocol_fees();
+        assert_eq!(w2_a, 0_i128);
+        assert_eq!(w2_b, 0_i128);
+    }
+
+    #[test]
+    fn test_reaccrual_after_withdrawal() {
+        let (env, admin, amm_addr, lp_addr, _) = setup();
+
+        let (ta_client, ta_sac) = create_sac(&env, &admin);
+        let (tb_client, tb_sac) = create_sac(&env, &admin);
+
+        let amm = AmmPoolClient::new(&env, &amm_addr);
+        amm.initialize(
+            &ta_client.address,
+            &tb_client.address,
+            &lp_addr,
+            &30_i128,
+            &admin,
+            &5_i128,
+        );
+
+        let provider = Address::generate(&env);
+        ta_sac.mint(&provider, &1_000_000_i128);
+        tb_sac.mint(&provider, &1_000_000_i128);
+        amm.add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &0_i128);
+
+        let trader = Address::generate(&env);
+        ta_sac.mint(&trader, &200_000_i128);
+
+        // Swap → withdraw → swap again → withdraw: fees re-accrue after reset.
+        amm.swap(&trader, &ta_client.address, &100_000_i128, &0_i128);
+        let (w1, _) = amm.withdraw_protocol_fees();
+        assert!(w1 > 0);
+
+        amm.swap(&trader, &ta_client.address, &100_000_i128, &0_i128);
+        let (w2, _) = amm.withdraw_protocol_fees();
+        assert!(w2 > 0);
     }
 }
