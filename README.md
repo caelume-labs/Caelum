@@ -75,12 +75,16 @@ Located in [contracts/amm/src/lib.rs](contracts/amm/src/lib.rs).
 | `TotalShares` | `i128` | Total LP shares outstanding |
 | `Shares(Address)` | `i128` | LP shares held by a specific provider |
 | `FeeBps` | `i128` | Swap fee in basis points (e.g. `30` = 0.30%) |
+| `Paused` | `bool` | Emergency circuit breaker state |
 
 #### Public Interface
 
 | Function | Description |
 |---|---|
 | `initialize(token_a, token_b, lp_token, fee_bps)` | One-time pool setup |
+| `pause(admin)` | Pause state-changing pool operations; requires `admin` auth |
+| `unpause(admin)` | Resume state-changing pool operations; requires `admin` auth |
+| `is_paused() → bool` | Read the current pause state |
 | `add_liquidity(provider, amount_a, amount_b, min_shares) → shares` | Deposit tokens, receive LP shares |
 | `remove_liquidity(provider, shares, min_a, min_b) → (a, b)` | Burn LP shares, withdraw tokens |
 | `swap(trader, token_in, amount_in, min_out) → amount_out` | Exchange tokens |
