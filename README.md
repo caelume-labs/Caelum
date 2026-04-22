@@ -22,6 +22,7 @@ A constant-product Automated Market Maker (AMM) built as a Soroban smart contrac
   - [Swap Tokens](#swap-tokens)
   - [Remove Liquidity](#remove-liquidity)
   - [Query the Pool](#query-the-pool)
+  - [TypeScript Client Example](#typescript-client-example)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -364,6 +365,17 @@ stellar contract invoke --id <AMM_CONTRACT_ID> \
 # LP share balance
 stellar contract invoke --id <AMM_CONTRACT_ID> \
   -- shares_of --provider <PROVIDER_ADDRESS>
+```
+
+### TypeScript Client Example
+
+A standalone TypeScript client is available in [examples/client](examples/client). It demonstrates connecting to Stellar testnet RPC, reading `get_info()`, quoting with `get_amount_out()`, executing `swap()`, and reading LP shares with `shares_of()`.
+
+```sh
+cd examples/client
+npm install
+npm run build
+npm start
 ```
 
 ---
