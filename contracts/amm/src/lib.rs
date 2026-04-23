@@ -9,7 +9,9 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
+};
 // Standard SEP-41 interface for pool tokens (token_a, token_b)
 use soroban_sdk::token::Client as SepTokenClient;
 // Our custom LP token client (has mint + burn)
@@ -276,8 +278,8 @@ impl AmmPool {
         client_b.transfer(&env.current_contract_address(), &provider, &out_b);
 
         env.events().publish(
-            (Symbol::new(&env, "remove_liquidity"), provider),
-            (out_a, out_b, shares),
+            (symbol_short!("rm_liq"),),
+            (provider.clone(), shares, out_a, out_b),
         );
 
         (out_a, out_b)
@@ -903,5 +905,39 @@ mod tests {
             amount_in_reverse <= amount_in + 1,
             "reverse quote should be at most 1 unit above original input"
         );
+    }
+
+    #[test]
+    fn test_remove_liquidity_emits_event() {
+        use soroban_sdk::testutils::Events as _;
+        use soroban_sdk::{symbol_short, vec, IntoVal};
+
+        let (env, admin, amm_addr, lp_addr, _) = setup();
+
+        let (ta_client, ta_sac) = create_sac(&env, &admin);
+        let (tb_client, tb_sac) = create_sac(&env, &admin);
+
+        let amm = AmmPoolClient::new(&env, &amm_addr);
+        amm.initialize(&ta_client.address, &tb_client.address, &lp_addr, &30_i128);
+
+        let provider = Address::generate(&env);
+        ta_sac.mint(&provider, &1_000_000_i128);
+        tb_sac.mint(&provider, &1_000_000_i128);
+
+        let shares = amm.add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &0_i128);
+        let (out_a, out_b) = amm.remove_liquidity(&provider, &shares, &0_i128, &0_i128);
+
+        // Find the rm_liq event among all published events
+        let events = env.events().all();
+        let rm_liq_event = events.iter().find(|(_, topics, _)| {
+            topics == &vec![&env, symbol_short!("rm_liq").into_val(&env)]
+        });
+
+        assert!(rm_liq_event.is_some(), "rm_liq event not emitted");
+
+        let (_, _, data) = rm_liq_event.unwrap();
+        let expected: soroban_sdk::Val =
+            (provider.clone(), shares, out_a, out_b).into_val(&env);
+        assert_eq!(data, expected);
     }
 }
