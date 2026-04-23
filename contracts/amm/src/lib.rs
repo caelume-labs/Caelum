@@ -9,9 +9,7 @@
 
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
-};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
 // Standard SEP-41 interface for pool tokens (token_a, token_b)
 use soroban_sdk::token::Client as SepTokenClient;
 
@@ -536,9 +534,15 @@ impl AmmPool {
         let fee_bps: i128 = env.storage().instance().get(&DataKey::FeeBps).unwrap();
 
         let (reserve_in, reserve_out) = if token_out == token_a {
-            (Self::get_reserve_b(env.clone()), Self::get_reserve_a(env.clone()))
+            (
+                Self::get_reserve_b(env.clone()),
+                Self::get_reserve_a(env.clone()),
+            )
         } else if token_out == token_b {
-            (Self::get_reserve_a(env.clone()), Self::get_reserve_b(env.clone()))
+            (
+                Self::get_reserve_a(env.clone()),
+                Self::get_reserve_b(env.clone()),
+            )
         } else {
             panic!("unknown token");
         };
@@ -546,9 +550,7 @@ impl AmmPool {
         assert!(reserve_in > 0 && reserve_out > 0, "zero reserve");
         assert!(amount_out < reserve_out, "amount_out >= reserve_out");
 
-        (reserve_in * amount_out * 10_000)
-            / ((reserve_out - amount_out) * (10_000 - fee_bps))
-            + 1
+        (reserve_in * amount_out * 10_000) / ((reserve_out - amount_out) * (10_000 - fee_bps)) + 1
     }
 
     /// Return full pool state.
@@ -680,6 +682,23 @@ mod tests {
         tb_addr: Address,
         #[allow(dead_code)]
         admin: Address,
+    }
+
+    fn setup() -> (Env, Address, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let amm_addr = env.register_contract(None, AmmPool);
+        let lp_addr = env.register_contract(None, LpToken);
+
+        token::LpTokenClient::new(&env, &lp_addr).initialize(
+            &amm_addr,
+            &soroban_sdk::String::from_str(&env, "AMM LP Token"),
+            &soroban_sdk::String::from_str(&env, "ALP"),
+            &7u32,
+        );
+        let dummy = Address::generate(&env);
+        (env, admin, amm_addr, lp_addr, dummy)
     }
 
     fn setup_pool(fee_bps: i128) -> TestSetup {
@@ -1065,12 +1084,15 @@ mod tests {
                 new_k >= current_k,
                 "k decreased: new_k ({new_k}) < current_k ({current_k}) at swap {i}"
             );
-            
+
             current_k = new_k;
         }
 
         // Final k should be strictly greater than initial k because of fees
         assert!(current_k > initial_k);
+    }
+
+    #[test]
     fn test_get_amount_in_round_trip() {
         let (env, admin, amm_addr, lp_addr, _) = setup();
 
@@ -1127,16 +1149,16 @@ mod tests {
 
         // Find the rm_liq event among all published events
         let events = env.events().all();
-        let rm_liq_event = events.iter().find(|(_, topics, _)| {
-            topics == &vec![&env, symbol_short!("rm_liq").into_val(&env)]
-        });
+        let rm_liq_event = events
+            .iter()
+            .find(|(_, topics, _)| topics == &vec![&env, symbol_short!("rm_liq").into_val(&env)]);
 
         assert!(rm_liq_event.is_some(), "rm_liq event not emitted");
 
         let (_, _, data) = rm_liq_event.unwrap();
-        let expected: soroban_sdk::Val =
-            (provider.clone(), shares, out_a, out_b).into_val(&env);
-        assert_eq!(data, expected);
+        let actual: (Address, i128, i128, i128) = data.into_val(&env);
+        let expected = (provider.clone(), shares, out_a, out_b);
+        assert_eq!(actual, expected);
     }
 
     #[test]
