@@ -21,7 +21,16 @@ pub struct LpToken;
 #[contractimpl]
 impl LpToken {
     /// Initialize the token with metadata and an admin that can mint/burn.
-    pub fn initialize(env: Env, admin: Address, name: String, symbol: String, decimals: u32) {
+    ///
+    /// `admin` is the only address authorized to call `mint` and `burn`.
+    /// Panics if the contract has already been initialized.
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        name: String,
+        symbol: String,
+        decimals: u32,
+    ) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!(
                 "already initialized: contract {:?}",
@@ -37,18 +46,22 @@ impl LpToken {
 
     // ── Read ──────────────────────────────────────────────────────────────────
 
+    /// Returns the token name.
     pub fn name(env: Env) -> String {
         env.storage().instance().get(&DataKey::Name).unwrap()
     }
 
+    /// Returns the token symbol.
     pub fn symbol(env: Env) -> String {
         env.storage().instance().get(&DataKey::Symbol).unwrap()
     }
 
+    /// Returns the number of decimal places used to represent token amounts.
     pub fn decimals(env: Env) -> u32 {
         env.storage().instance().get(&DataKey::Decimals).unwrap()
     }
 
+    /// Returns the total number of tokens currently in circulation.
     pub fn total_supply(env: Env) -> i128 {
         env.storage()
             .instance()
@@ -56,6 +69,7 @@ impl LpToken {
             .unwrap_or(0)
     }
 
+    /// Returns the token balance of `id`. Returns `0` if the account has no balance.
     pub fn balance(env: Env, id: Address) -> i128 {
         env.storage()
             .persistent()
@@ -63,6 +77,8 @@ impl LpToken {
             .unwrap_or(0)
     }
 
+    /// Returns the amount `spender` is allowed to transfer on behalf of `from`.
+    /// Returns `0` if no allowance has been set.
     pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
         env.storage()
             .persistent()
@@ -72,11 +88,20 @@ impl LpToken {
 
     // ── Write ─────────────────────────────────────────────────────────────────
 
+    /// Transfer `amount` tokens from `from` to `to`.
+    ///
+    /// Requires authorization from `from`.
+    /// Panics if `from` has insufficient balance.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
         from.require_auth();
         Self::_transfer(&env, &from, &to, amount);
     }
 
+    /// Transfer `amount` tokens from `from` to `to` using a pre-approved allowance.
+    ///
+    /// Requires authorization from `spender`.
+    /// Panics if the current allowance of `spender` over `from` is less than `amount`.
+    /// Panics if `from` has insufficient balance.
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
         spender.require_auth();
         let allowance = Self::allowance(env.clone(), from.clone(), spender.clone());
@@ -91,6 +116,10 @@ impl LpToken {
         Self::_transfer(&env, &from, &to, amount);
     }
 
+    /// Approve `spender` to transfer up to `amount` tokens on behalf of `from`.
+    ///
+    /// Requires authorization from `from`.
+    /// Setting `amount` to `0` effectively revokes the allowance.
     pub fn approve(env: Env, from: Address, spender: Address, amount: i128) {
         from.require_auth();
         env.storage()
@@ -132,6 +161,7 @@ impl LpToken {
 
     // ── Internal ──────────────────────────────────────────────────────────────
 
+    /// Returns the admin address that is authorized to mint and burn tokens.
     pub fn admin(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Admin).unwrap()
     }
