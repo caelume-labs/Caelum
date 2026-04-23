@@ -100,6 +100,17 @@ The AMM contract depends on the token contract. When liquidity is added or remov
 
 ## Public Interface
 
+| Key | Type | Description |
+|---|---|---|
+| `TokenA` | `Address` | First pool asset |
+| `TokenB` | `Address` | Second pool asset |
+| `LpToken` | `Address` | LP token contract |
+| `ReserveA` | `i128` | Pool's current balance of TokenA |
+| `ReserveB` | `i128` | Pool's current balance of TokenB |
+| `TotalShares` | `i128` | Total LP shares outstanding |
+| `Shares(Address)` | `i128` | LP shares held by a specific provider |
+| `FeeBps` | `i128` | Swap fee in basis points (e.g. `30` = 0.30%) |
+| `FlashLoanFeeBps` | `i128` | Flash-loan fee in basis points; defaults to `FeeBps` |
 ### AMM Pool Contract
 
 Located in [contracts/amm/src/lib.rs](contracts/amm/src/lib.rs).
@@ -107,12 +118,26 @@ Located in [contracts/amm/src/lib.rs](contracts/amm/src/lib.rs).
 | Function | Description |
 |---|---|
 | `initialize(token_a, token_b, lp_token, fee_bps)` | One-time pool setup |
+| `initialize_with_flash_loan_fee(token_a, token_b, lp_token, fee_bps, flash_loan_fee_bps)` | One-time pool setup with a distinct flash-loan fee |
+| `flash_loan(receiver, token, amount, data) -> fee` | Borrow pool reserves and repay within the receiver callback |
 | `add_liquidity(provider, amount_a, amount_b, min_shares) → shares` | Deposit tokens, receive LP shares |
 | `remove_liquidity(provider, shares, min_a, min_b) → (a, b)` | Burn LP shares, withdraw tokens |
 | `swap(trader, token_in, amount_in, min_out) → amount_out` | Exchange tokens |
 | `get_amount_out(token_in, amount_in) → amount_out` | Quote a swap without executing it |
 | `get_info() → PoolInfo` | Read pool state (reserves, fee, shares) |
 | `shares_of(provider) → shares` | Read an LP's share balance |
+
+#### Flash Loan Receiver Interface
+
+Borrowers must implement a callback contract with this interface:
+
+```rust
+pub trait FlashLoanReceiver {
+    fn on_flash_loan(env: Env, token: Address, amount: i128, fee: i128, data: Bytes) -> bool;
+}
+```
+
+During `flash_loan`, the AMM transfers `amount` of `token` to `receiver`, invokes `on_flash_loan`, and then checks that the pool's token balance increased by at least `fee`. If the receiver does not return `amount + fee` before the callback finishes, the transaction reverts.
 
 ### LP Token Contract
 
