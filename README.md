@@ -110,6 +110,7 @@ The AMM contract depends on the token contract. When liquidity is added or remov
 | `TotalShares` | `i128` | Total LP shares outstanding |
 | `Shares(Address)` | `i128` | LP shares held by a specific provider |
 | `FeeBps` | `i128` | Swap fee in basis points (e.g. `30` = 0.30%) |
+| `Paused` | `bool` | Emergency circuit breaker state |
 | `FlashLoanFeeBps` | `i128` | Flash-loan fee in basis points; defaults to `FeeBps` |
 ### AMM Pool Contract
 
@@ -118,6 +119,9 @@ Located in [contracts/amm/src/lib.rs](contracts/amm/src/lib.rs).
 | Function | Description |
 |---|---|
 | `initialize(token_a, token_b, lp_token, fee_bps)` | One-time pool setup |
+| `pause(admin)` | Pause state-changing pool operations; requires `admin` auth |
+| `unpause(admin)` | Resume state-changing pool operations; requires `admin` auth |
+| `is_paused() → bool` | Read the current pause state |
 | `initialize_with_flash_loan_fee(token_a, token_b, lp_token, fee_bps, flash_loan_fee_bps)` | One-time pool setup with a distinct flash-loan fee |
 | `flash_loan(receiver, token, amount, data) -> fee` | Borrow pool reserves and repay within the receiver callback |
 | `add_liquidity(provider, amount_a, amount_b, min_shares) → shares` | Deposit tokens, receive LP shares |
