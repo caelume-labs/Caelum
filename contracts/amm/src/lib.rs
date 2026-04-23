@@ -684,9 +684,12 @@ mod tests {
         admin: Address,
     }
 
+    /// Minimal setup: env + uninitialized AMM + LP token. Tokens are created by
+    /// individual tests so each test can control the pool ratio independently.
     fn setup() -> (Env, Address, Address, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
+        env.ledger().set_timestamp(12345);
         let admin = Address::generate(&env);
         let amm_addr = env.register_contract(None, AmmPool);
         let lp_addr = env.register_contract(None, LpToken);
@@ -697,14 +700,13 @@ mod tests {
             &soroban_sdk::String::from_str(&env, "ALP"),
             &7u32,
         );
-        let dummy = Address::generate(&env);
-        (env, admin, amm_addr, lp_addr, dummy)
+        (env, admin.clone(), amm_addr, lp_addr, admin)
     }
 
     fn setup_pool(fee_bps: i128) -> TestSetup {
         let env = Env::default();
         env.mock_all_auths();
-
+        env.ledger().set_timestamp(12345);
         let admin = Address::generate(&env);
         let amm_addr = env.register_contract(None, AmmPool);
         let lp_addr = env.register_contract(None, LpToken);
@@ -1094,26 +1096,24 @@ mod tests {
 
     #[test]
     fn test_get_amount_in_round_trip() {
-        let (env, admin, amm_addr, lp_addr, _) = setup();
+        let ts = setup_pool(30);
+        let env = &ts.env;
+        let amm = AmmPoolClient::new(env, &ts.amm_addr);
+        let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+        let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
 
-        let (ta_client, ta_sac) = create_sac(&env, &admin);
-        let (tb_client, tb_sac) = create_sac(&env, &admin);
-
-        let amm = AmmPoolClient::new(&env, &amm_addr);
-        amm.initialize(&ta_client.address, &tb_client.address, &lp_addr, &30_i128);
-
-        let provider = Address::generate(&env);
+        let provider = Address::generate(env);
         ta_sac.mint(&provider, &1_000_000_i128);
         tb_sac.mint(&provider, &2_000_000_i128);
         amm.add_liquidity(&provider, &1_000_000_i128, &2_000_000_i128, &0_i128);
 
         // Forward: how much B do we get for 100_000 A?
         let amount_in = 100_000_i128;
-        let amount_out = amm.get_amount_out(&ta_client.address, &amount_in);
+        let amount_out = amm.get_amount_out(&ts.ta_addr, &amount_in);
         assert!(amount_out > 0);
 
         // Reverse: how much A is needed to get exactly amount_out of B?
-        let amount_in_reverse = amm.get_amount_in(&tb_client.address, &amount_out);
+        let amount_in_reverse = amm.get_amount_in(&ts.tb_addr, &amount_out);
 
         // Due to integer rounding (+1 in get_amount_in), the reverse quote
         // should be >= the original input and at most 1 unit more.
@@ -1132,15 +1132,13 @@ mod tests {
         use soroban_sdk::testutils::Events as _;
         use soroban_sdk::{symbol_short, vec, IntoVal};
 
-        let (env, admin, amm_addr, lp_addr, _) = setup();
+        let ts = setup_pool(30);
+        let env = &ts.env;
+        let amm = AmmPoolClient::new(env, &ts.amm_addr);
+        let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+        let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
 
-        let (ta_client, ta_sac) = create_sac(&env, &admin);
-        let (tb_client, tb_sac) = create_sac(&env, &admin);
-
-        let amm = AmmPoolClient::new(&env, &amm_addr);
-        amm.initialize(&ta_client.address, &tb_client.address, &lp_addr, &30_i128);
-
-        let provider = Address::generate(&env);
+        let provider = Address::generate(env);
         ta_sac.mint(&provider, &1_000_000_i128);
         tb_sac.mint(&provider, &1_000_000_i128);
 
@@ -1151,14 +1149,11 @@ mod tests {
         let events = env.events().all();
         let rm_liq_event = events
             .iter()
-            .find(|(_, topics, _)| topics == &vec![&env, symbol_short!("rm_liq").into_val(&env)]);
-
-        assert!(rm_liq_event.is_some(), "rm_liq event not emitted");
-
-        let (_, _, data) = rm_liq_event.unwrap();
-        let actual: (Address, i128, i128, i128) = data.into_val(&env);
+            .find(|e| e.0 == amm.address && e.1 == vec![env, symbol_short!("rm_liq")].into_val(env))
+            .expect("remove_liquidity event not found");
+        let data: (Address, i128, i128, i128) = rm_liq_event.2.into_val(env);
         let expected = (provider.clone(), shares, out_a, out_b);
-        assert_eq!(actual, expected);
+        assert_eq!(data, expected);
     }
 
     #[test]
@@ -1175,35 +1170,140 @@ mod tests {
         tb_sac.mint(&provider, &1_000_000_i128);
         amm.add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &0_i128);
 
-        // Initial state: price 1.0 (represented as 1,000,000)
+        // Initial state: accumulators should be 0
         let (cum_a, cum_b, last_ts) = amm.get_price_cumulative();
         assert_eq!(cum_a, 0);
         assert_eq!(cum_b, 0);
-        // last_ts should match the ledger timestamp at initialization
-        // Ledgers start at 0 in tests unless set
-        assert_eq!(last_ts, 0);
+        assert!(last_ts > 0);
 
-        // Advance time by 10 seconds and perform a swap
-        env.ledger().set_timestamp(10);
+        // Jump 10 seconds ahead
+        env.ledger().set_timestamp(last_ts + 10);
+
+        // Swap A for B
         let trader = Address::generate(env);
         ta_sac.mint(&trader, &100_000_i128);
         amm.swap(&trader, &ts.ta_addr, &100_000_i128, &0_i128);
 
-        // Accumulator should have updated: elapsed=10, price=1.0 * 1,000,000 = 1,000,000
-        // cum_a = 0 + 1,000,000 * 10 = 10,000,000
-        let (cum_a2, cum_b2, last_ts2) = amm.get_price_cumulative();
-        assert_eq!(cum_a2, 10_000_000);
-        assert_eq!(cum_b2, 10_000_000);
-        assert_eq!(last_ts2, 10);
+        // Accumulators should have updated: price (1_000_000) * 10 seconds = 10_000_000
+        let (new_cum_a, new_cum_b, new_ts) = amm.get_price_cumulative();
+        assert_eq!(new_ts, last_ts + 10);
+        assert_eq!(new_cum_a, 10_000_000);
+        assert_eq!(new_cum_b, 10_000_000);
 
-        // Advance time by another 20 seconds and perform another swap
-        env.ledger().set_timestamp(30);
+        // Jump another 5 seconds
+        env.ledger().set_timestamp(new_ts + 5);
+
+        // New spot price after swap:
+        // reserve_a = 1_100_000, reserve_b = 1_000_000 - out
+        // Price A = (1_000_000 - out) * 1_000_000 / 1_100_000
+        let info = amm.get_info();
+        let expected_price_a = info.reserve_b * 1_000_000 / info.reserve_a;
+        let expected_price_b = info.reserve_a * 1_000_000 / info.reserve_b;
+
+        // Perform another swap
         tb_sac.mint(&trader, &50_000_i128);
         amm.swap(&trader, &ts.tb_addr, &50_000_i128, &0_i128);
 
-        let (cum_a3, cum_b3, last_ts3) = amm.get_price_cumulative();
-        assert!(cum_a3 > cum_a2);
-        assert!(cum_b3 > cum_b2);
-        assert_eq!(last_ts3, 30);
+        let (final_cum_a, final_cum_b, final_ts) = amm.get_price_cumulative();
+        assert_eq!(final_ts, new_ts + 5);
+        assert_eq!(final_cum_a, new_cum_a + expected_price_a * 5);
+        assert_eq!(final_cum_b, new_cum_b + expected_price_b * 5);
+    }
+
+    // ── Edge cases: zero-reserve guard ───────────────────────────────────────────
+
+    #[test]
+    fn test_swap_on_empty_pool_panics() {
+        let ts = setup_pool(30);
+        let env = &ts.env;
+        let amm = AmmPoolClient::new(env, &ts.amm_addr);
+        let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+
+        let trader = Address::generate(env);
+        ta_sac.mint(&trader, &1_000_i128);
+        let result = amm.try_swap(&trader, &ts.ta_addr, &1_000_i128, &0_i128);
+        assert!(result.is_err());
+    }
+
+    // ── Edge cases: fee boundary ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_fee_bps_zero_succeeds() {
+        let ts = setup_pool(0);
+        let env = &ts.env;
+        let amm = AmmPoolClient::new(env, &ts.amm_addr);
+        let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+        let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+        let provider = Address::generate(env);
+        ta_sac.mint(&provider, &1_000_000_i128);
+        tb_sac.mint(&provider, &1_000_000_i128);
+        amm.add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &0_i128);
+
+        let trader = Address::generate(env);
+        let amount_in = 100_000_i128;
+        ta_sac.mint(&trader, &amount_in);
+        let out = amm.swap(&trader, &ts.ta_addr, &amount_in, &0_i128);
+        // fee_bps=0 → no discount; pure constant-product formula
+        let expected = amount_in * 1_000_000 / (1_000_000 + amount_in);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn test_fee_bps_max_succeeds() {
+        // fee_bps=10_000 is the inclusive upper bound; pool initializes successfully.
+        // With 100% fee, amount_in_with_fee = 0, so amount_out = 0.
+        let ts = setup_pool(10_000);
+        let env = &ts.env;
+        let amm = AmmPoolClient::new(env, &ts.amm_addr);
+        let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+        let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+        let provider = Address::generate(env);
+        ta_sac.mint(&provider, &1_000_000_i128);
+        tb_sac.mint(&provider, &1_000_000_i128);
+        amm.add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &0_i128);
+
+        let trader = Address::generate(env);
+        ta_sac.mint(&trader, &100_000_i128);
+        let result = amm.try_swap(&trader, &ts.ta_addr, &100_000_i128, &0_i128);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().unwrap(), 0);
+    }
+
+    // ── Edge cases: minimum share precision ──────────────────────────────────────
+
+    #[test]
+    fn test_min_shares_exact_succeeds() {
+        let ts = setup_pool(30);
+        let env = &ts.env;
+        let amm = AmmPoolClient::new(env, &ts.amm_addr);
+        let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+        let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+        let provider = Address::generate(env);
+        ta_sac.mint(&provider, &1_000_000_i128);
+        tb_sac.mint(&provider, &1_000_000_i128);
+        // Initial deposit: shares = sqrt(1_000_000 * 1_000_000) = 1_000_000
+        let shares =
+            amm.add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &1_000_000_i128);
+        assert_eq!(shares, 1_000_000);
+    }
+
+    #[test]
+    fn test_min_shares_off_by_one_panics() {
+        let ts = setup_pool(30);
+        let env = &ts.env;
+        let amm = AmmPoolClient::new(env, &ts.amm_addr);
+        let ta_sac = StellarAssetClient::new(env, &ts.ta_addr);
+        let tb_sac = StellarAssetClient::new(env, &ts.tb_addr);
+
+        let provider = Address::generate(env);
+        ta_sac.mint(&provider, &1_000_000_i128);
+        tb_sac.mint(&provider, &1_000_000_i128);
+        // Expected = 1_000_000; requesting 1_000_001 triggers the slippage guard.
+        let result =
+            amm.try_add_liquidity(&provider, &1_000_000_i128, &1_000_000_i128, &1_000_001_i128);
+        assert!(result.is_err());
     }
 }
