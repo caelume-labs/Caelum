@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320">
+  <defs>
+    <linearGradient id="cbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0a1f3d"/>
+      <stop offset="100%" stop-color="#1e4a72"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="320" fill="url(#cbg)"/>
+  <g fill="none" stroke="#4aa3df" stroke-width="2" opacity="0.45">
+    <path d="M 600 280 Q 800 80 1180 280"/>
+    <path d="M 600 280 Q 800 130 1180 250" opacity="0.7"/>
+    <path d="M 600 280 Q 800 180 1180 230" opacity="0.5"/>
+    <path d="M 600 280 Q 800 220 1180 210" opacity="0.3"/>
+  </g>
+  <g>
+    <circle cx="830" cy="180" r="10" fill="#eaf6ff"/>
+    <circle cx="1060" cy="180" r="10" fill="#eaf6ff"/>
+    <line x1="830" y1="180" x2="1060" y2="180" stroke="#eaf6ff" stroke-width="2" stroke-dasharray="5 7" opacity="0.55"/>
+  </g>
+  <g font-family="Georgia, 'Times New Roman', serif" fill="#eaf6ff">
+    <text x="80" y="170" font-size="92" font-weight="700" letter-spacing="4">Caelum</text>
+    <text x="80" y="220" font-size="22" fill="#88c0e8" letter-spacing="2">CONSTANT PRODUCT AMM ON SOROBAN</text>
+  </g>
+</svg>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0a1f3d"/>
+      <stop offset="50%" stop-color="#1e4a72"/>
+      <stop offset="100%" stop-color="#4aa3df"/>
+    </linearGradient>
+  </defs>
+  <rect width="400" height="400" fill="url(#sky)"/>
+  <g fill="none" stroke="#eaf6ff" stroke-width="3" stroke-linecap="round" opacity="0.85">
+    <path d="M 60 260 Q 200 100 340 260" />
+    <path d="M 60 200 Q 200 140 340 200" opacity="0.6"/>
+    <path d="M 60 300 Q 200 200 340 300" opacity="0.4"/>
+  </g>
+  <g>
+    <circle cx="140" cy="220" r="14" fill="#eaf6ff"/>
+    <circle cx="260" cy="220" r="14" fill="#eaf6ff"/>
+    <line x1="140" y1="220" x2="260" y2="220" stroke="#eaf6ff" stroke-width="2.5" stroke-dasharray="6 8" opacity="0.6"/>
+  </g>
+  <g fill="#eaf6ff" font-family="monospace" opacity="0.6">
+    <text x="200" y="350" text-anchor="middle" font-size="22" letter-spacing="6">x · y = k</text>
+  </g>
+</svg>

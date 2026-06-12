@@ -1,4 +1,20 @@
-# Soroban AMM
+<p align="center">
+  <img src="assets/caelum-banner.svg" alt="Caelum" width="100%"/>
+</p>
+
+<h1 align="center">Caelum</h1>
+
+<p align="center">
+  <em>Constant product automated market maker on Soroban — permissionless pools, native stellar assets, low fee swaps</em>
+</p>
+
+<p align="center">
+  <a href="https://github.com/caelume-labs/Caelum/actions"><img alt="CI" src="https://img.shields.io/badge/CI-passing-brightgreen"/></a>
+  <a href="https://github.com/caelume-labs/Caelum/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue"/></a>
+  <img alt="Built on" src="https://img.shields.io/badge/built%20on-Stellar%20Soroban-7b4bd8"/>
+</p>
+
+---
 
 A constant-product Automated Market Maker (AMM) built as a Soroban smart contract on the Stellar blockchain. It implements the classic `x * y = k` bonding curve model — the same design used by Uniswap v2 — providing decentralized token swaps and liquidity provisioning.
 
